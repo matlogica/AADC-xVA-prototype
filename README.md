@@ -12,7 +12,7 @@ pip install numpy python-dateutil matplotlib jupyter
 
 ### Cash flow description
 
-Using expression tree
+Using expression tree. Based on ideas from https://antoinesavine.com/books-by-antoine-savine/
 
 See observable.ipynb
 
