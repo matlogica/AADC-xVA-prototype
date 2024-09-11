@@ -13,12 +13,15 @@ class Contract:
             return self
         return Leg(contracts=[self, other.negate()])
 
+print_offset = 0
+
 class Leg(Contract):
     def __init__(self, contracts) -> None:
         self.contracts = contracts
 
     def __repr__(self):
-        return "\n".join(str(el) for el in self.contracts)
+        result = "\n".join(str(el) for el in self.contracts)
+        return result
 
     def negate(self):
         return Leg([cf.negate() for cf in self.contracts])
@@ -37,9 +40,11 @@ class Cashflow(Contract):
         return Cashflow(self.observable, self.payment_date, self.payment_currency, -self.notional)
 
     def __repr__(self):
+        global print_offset
+        offset = " " * print_offset
         if hasattr(self.observable, "value"):
-            return f"{self.observable}\t{self.notional}\t{self.payment_currency}\t{self.payment_date.strftime('%Y-%m-%d')}\t{self.observable.value}"
-        return f"{self.observable}\t{self.notional}\t{self.payment_currency}\t{self.payment_date.strftime('%Y-%m-%d')}"
+            return f"{offset}{self.observable}\t{self.notional}\t{self.payment_currency}\t{self.payment_date.strftime('%Y-%m-%d')}\t{self.observable.value}"
+        return f"{offset}{self.observable}\t{self.notional}\t{self.payment_currency}\t{self.payment_date.strftime('%Y-%m-%d')}"
     
     def to_json(self):
         return {
@@ -56,7 +61,18 @@ class Fork(Contract):
         self.contract2 = contract2
 
     def __repr__(self):
-        return f"if {self.condition} is positive then {self.contract1} else\n{self.contract2}"
+        global print_offset
+        offset = " " * print_offset
+        result = f"{offset}if {self.condition} is positive then\n"
+        print_offset += 4
+        if not isinstance(self.contract1, Contract):
+            result += " " * print_offset
+        result += f"{self.contract1}\n{offset}else\n"
+        if not isinstance(self.contract2, Contract):
+            result += " " * print_offset
+        result += f"{self.contract2}"
+        print_offset -= 4
+        return result
     
     def to_json(self):
         return {
@@ -81,6 +97,23 @@ if __name__  == "__main__":
     import json
     from schedule import schedule
     from dateutil.relativedelta import relativedelta
+
+    strike = 100.0
+    expiry = datetime(2024, 7, 10)
+    ccy = "EUR"
+    notional = 1_000_000
+    ticker = Ticker("AAPL", "Yahoo")
+    european_put_option = Cashflow(np.max(Observation(ticker, expiry) - strike, 0), expiry, ccy, notional)
+
+    # european_call_option using Fork in "autocallable" style
+    call_flag = Observation(ticker, expiry) - strike
+    european_call_option = Fork(call_flag, Cashflow(Observation(ticker, expiry), expiry, ccy, notional) - Cashflow(strike, expiry, ccy, notional), None)
+
+    # european_call_option using Fork with counterparty decision
+    # For pricing purposes, the decision can be modeled using Longstaff-Schwartz algorithm
+    cpty_decision = Observation(Ticker("TradeID", "CPTY"), expiry)
+    european_call_option2 = Fork(cpty_decision, Cashflow(Observation(ticker, expiry), expiry, ccy, notional) - Cashflow(strike, expiry, ccy, notional), None)
+    print(european_call_option2)
 
     start_date = datetime(2024, 7, 10)
     tenor = relativedelta(years=10)

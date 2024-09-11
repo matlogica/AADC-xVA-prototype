@@ -10,6 +10,14 @@ class Ticker:
     def __repr__(self):
         return self.symbol
     
+    def __eq__(self, value: object) -> bool:
+        if isinstance(value, Ticker):
+            return self.symbol == value.symbol and self.source == value.source
+        return False
+    
+    def __hash__(self):
+        return hash((self.symbol, self.source))
+    
     def to_json(self):
         return {
             "symbol": self.symbol,
@@ -79,6 +87,14 @@ class Observation(Observable):
 
     def __repr__(self):
         return f"{self.ticker}({self.fixing_datetime.strftime('%Y-%m-%d')})"
+    
+    def __eq__(self, value: object) -> bool:
+        if isinstance(value, Observation):
+            return self.ticker == value.ticker and self.fixing_datetime == value.fixing_datetime
+        return False
+    
+    def __hash__(self):
+        return hash((self.ticker, self.fixing_datetime))
     
     def to_json(self):
         return {
