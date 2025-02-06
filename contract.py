@@ -25,7 +25,7 @@ class Leg(Contract):
 
     def negate(self):
         return Leg([cf.negate() for cf in self.contracts])
-    
+
     def to_json(self):
         return [cf.to_json() for cf in self.contracts]
 
@@ -42,10 +42,8 @@ class Cashflow(Contract):
     def __repr__(self):
         global print_offset
         offset = " " * print_offset
-        if hasattr(self.observable, "value"):
-            return f"{offset}{self.observable}\t{self.notional}\t{self.payment_currency}\t{self.payment_date.strftime('%Y-%m-%d')}\t{self.observable.value}"
         return f"{offset}{self.observable}\t{self.notional}\t{self.payment_currency}\t{self.payment_date.strftime('%Y-%m-%d')}"
-    
+
     def to_json(self):
         return {
             "observable": str(self.observable),
@@ -73,7 +71,7 @@ class Option(Contract):
         result += f"{self.contract2}"
         print_offset -= 4
         return result
-    
+
     def to_json(self):
         return {
             "condition": self.condition.to_json(),
@@ -123,7 +121,7 @@ if __name__  == "__main__":
     funding_leg_schedule = schedule(start_date, tenor, frequency=relativedelta(months=6))
     funding_fixings = [start - relativedelta(days=2) for start, _ in funding_leg_schedule]
 
-    call_dates = coupon_fixings[1:]
+    call_dates = coupon_fixings[1:-1]
 
     CMS20Y = Ticker("EUR.CMS.20Y", "Reuters")
     CMS2Y = Ticker("EUR.CMS.2Y", "Reuters")
@@ -148,7 +146,7 @@ if __name__  == "__main__":
     print("**********")
     print("TARN")
 
-    tarn_obs = np.cumsum(coupons)
+    tarn_obs = np.cumsum(coupons)[:-1]
 
     tarn = callable(tarn_obs - 0.1, cpn_cfs, funding_cfs, cpn_per_call=1, funding_per_call=2)
     print(tarn)
