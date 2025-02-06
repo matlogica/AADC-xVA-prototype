@@ -54,7 +54,7 @@ class Cashflow(Contract):
             "payment_date": self.payment_date.strftime('%Y-%m-%d')
         }
 
-class Fork(Contract):
+class Option(Contract):
     def __init__(self, condition: Observable, contract1: Contract, contract2: Contract) -> None:
         self.condition = condition
         self.contract1 = contract1
@@ -89,7 +89,7 @@ def callable(decision_obs, cpn_cfs, funding_cfs, cpn_per_call=1, funding_per_cal
     funding_cfs, last_funding_cfs = funding_cfs[:-funding_per_call], funding_cfs[-funding_per_call:]
     decision_obs, last_decision_obs = decision_obs[:-1], decision_obs[-1]
 
-    continuation = Fork(last_decision_obs, None, Leg(last_funding_cfs) - Leg(last_cpn_cfs) + continuation)
+    continuation = Option(last_decision_obs, None, Leg(last_funding_cfs) - Leg(last_cpn_cfs) + continuation)
     return callable(decision_obs, cpn_cfs, funding_cfs, cpn_per_call, funding_per_call, continuation)
 
 if __name__  == "__main__":
@@ -105,14 +105,14 @@ if __name__  == "__main__":
     ticker = Ticker("AAPL", "Yahoo")
     european_put_option = Cashflow(np.max(Observation(ticker, expiry) - strike, 0), expiry, ccy, notional)
 
-    # european_call_option using Fork in "autocallable" style
+    # european_call_option using Option in "autocallable" style
     call_flag = Observation(ticker, expiry) - strike
-    european_call_option = Fork(call_flag, Cashflow(Observation(ticker, expiry), expiry, ccy, notional) - Cashflow(strike, expiry, ccy, notional), None)
+    european_call_option = Option(call_flag, Cashflow(Observation(ticker, expiry), expiry, ccy, notional) - Cashflow(strike, expiry, ccy, notional), None)
 
-    # european_call_option using Fork with counterparty decision
+    # european_call_option using Option with counterparty decision
     # For pricing purposes, the decision can be modeled using Longstaff-Schwartz algorithm
     cpty_decision = Observation(Ticker("TradeID", "CPTY"), expiry)
-    european_call_option2 = Fork(cpty_decision, Cashflow(Observation(ticker, expiry), expiry, ccy, notional) - Cashflow(strike, expiry, ccy, notional), None)
+    european_call_option2 = Option(cpty_decision, Cashflow(Observation(ticker, expiry), expiry, ccy, notional) - Cashflow(strike, expiry, ccy, notional), None)
     print(european_call_option2)
 
     start_date = datetime(2024, 7, 10)
