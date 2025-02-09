@@ -79,6 +79,7 @@ Then navigate to the notebook you want to run.
 
 The implementation draws from key papers in quantitative finance:
 - Longstaff, F. A., & Schwartz, E. S. (2001). Valuing American options by simulation: A simple least-squares approach
+- Withington, L., & Lučić, A. (2009). Noisy hedges and fuzzy payoffs: using soft computing to improve risk stability. RBC Capital Markets
 - Huge, B., & Savine, A. (2020). Modern Computational Finance: AAD and Parallel Simulations
 - Green, A. (2015). XVA: Credit, Funding and Capital Valuation Adjustments
 
