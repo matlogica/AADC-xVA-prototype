@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from contract import Contract, Cashflow, Leg, Option
 from scipy.stats import norm
@@ -107,7 +107,8 @@ def fuzzify_contract(contract, condition = None, call_ticker = "Call", top_level
     if isinstance(contract, Cashflow):
         if condition is None:
             return contract
-        contract.observable = ObsOp(dependencies=[condition , contract.observable], operation='*') # i.e. we multiply sigmoid by value
+        contract.condition = condition
+#        contract.observable = ObsOp(dependencies=[condition , contract.observable], operation='*') # i.e. we multiply sigmoid by value
         return contract
     if isinstance(contract, Leg):
         return Leg([fuzzify_contract(cf, condition, call_ticker, False) for cf in contract.contracts])
@@ -116,11 +117,11 @@ def fuzzify_contract(contract, condition = None, call_ticker = "Call", top_level
             if contract.condition.ticker.symbol == call_ticker:
                 return Option(contract.condition, fuzzify_contract(contract.contract1, condition, call_ticker, False), fuzzify_contract(contract.contract2, condition, call_ticker, False))
         if condition is None:
-            this_condition1 = ObsOp(dependencies=[contract.condition], operation='sigmoid')
-            this_condition2 = (this_condition1 * (-1.0) + (1.0))
+            this_condition1 = [[contract.condition], 1.0]
+            this_condition2 = [[contract.condition], -1.0]
         else:
-            this_condition1 = ObsOp(dependencies=[condition , ObsOp(dependencies=[contract.condition], operation='sigmoid')], operation='*')
-            this_condition2 = (this_condition1 * (-1.0) + (1.0))
+            this_condition1 = condition + [[contract.condition], 1.0]
+            this_condition2 = condition + [[contract.condition], -1.0]
         return fuzzify_contract(contract.contract1, this_condition1, call_ticker, False) + fuzzify_contract(contract.contract2, this_condition2, call_ticker, False)
     return contract
 
@@ -129,8 +130,8 @@ def fuzzify_contract(contract, condition = None, call_ticker = "Call", top_level
 def tickers_in_observable(observable):
     if isinstance(observable, Observation):
         return {observable}
+    tickers = set()
     if hasattr(observable, 'dependencies'):
-        tickers = set()
         for dep in observable.dependencies:
             tickers.update(tickers_in_observable(dep))
         return tickers
@@ -145,6 +146,8 @@ def required_observations(portfolio):
     for trade in portfolio:
         if isinstance(trade, Cashflow):
             tickers.update(tickers_in_observable(trade.observable))
+            if hasattr(trade, 'condition'):
+                tickers.update(tickers_in_observable(trade.condition))
         elif isinstance(trade, Option):
             tickers.update(required_observations([trade.contract1, trade.contract2]))
             tickers.update(tickers_in_observable(trade.condition))
@@ -152,33 +155,6 @@ def required_observations(portfolio):
             tickers.update(required_observations(trade.contracts))
     return tickers
 
-if __name__  == "__main__":
-    portfolio = load_example_portfolio()
-
-    print(portfolio)
-    print(required_observations(portfolio))
-
-
-
-if __name__  == "__main__":
-
-    today = datetime(2024, 7, 11)
-
-    # xva_time_steps used for XVA calculations and t0 pricing
-    xva_time_steps = [today + relativedelta(days=7 * i) for i in range(52 * 5)]
-    last_week = xva_time_steps[-1]
-    xva_time_steps += [last_week + relativedelta(days=30 * i) for i in range(12 * 50)]
-
-    call_dates = [obs.fixing_datetime for obs in required_observations(portfolio) if isinstance(obs, Observation) and obs.ticker.symbol == "Call"]
-
-    obs_dates = [obs.fixing_datetime for obs in required_observations(portfolio) if isinstance(obs, Observation) and not obs.ticker.symbol == "Call"]
-
-    xva_time_steps = sorted(set(xva_time_steps + obs_dates + call_dates))
-
-    #print(xva_time_steps)
-
-    #plt.plot(xva_time_steps)
-    #plt.show()
 
 ######    
 # Step 5. Define a function to update observables in contracts. This function is used to update observables in contracts with new market data (historical or simulated)
@@ -193,20 +169,26 @@ def get_value(obs, N):  # N is annoying here. use it for np.max() # Error - The 
         return np.full((N), obs)
     return obs.value
 
+def is_const_observable(contract):
+    if isinstance(contract, float) or isinstance(contract, int) or contract is None:
+        return True
+    return False
+
 def update_observables(contract, market):
     if isinstance(contract, Cashflow):
         return update_observables(contract.observable, market)
     if isinstance(contract, Leg):
         args = True
         for cf in contract.contracts:
-            args = args & update_observables(cf, market)
+            cf_ok = update_observables(cf, market)
+            args = args & cf_ok
         return args
     if isinstance(contract, Option):
         args = True
         if not (isinstance(contract.condition, Observation) and contract.condition.ticker.symbol == "Call"):
             args = args and update_observables(contract.condition, market)
-        args = args and update_observables(contract.contract1, market)
-        args = args and update_observables(contract.contract2, market)
+        args and update_observables(contract.contract1, market)
+        args and update_observables(contract.contract2, market)
 
         return args
 
@@ -218,9 +200,14 @@ def update_observables(contract, market):
 
         # update dependencies
         args = True
+        known_at = datetime(1900, 1, 1)
         for dep in contract.dependencies:
             args = args & update_observables(dep, market)
+            if args and not is_const_observable(dep):
+                known_at = max(known_at, dep.known_at)
+
         if args:
+            contract.known_at = known_at
             if (contract.operation == "-"):
                 contract.value = get_value(contract.dependencies[0], market.N) - get_value(contract.dependencies[1], market.N)
             elif (contract.operation == "+"):
@@ -232,9 +219,6 @@ def update_observables(contract, market):
                 contract.value = get_value(contract.dependencies[0], market.N) / get_value(contract.dependencies[1], market.N)
             elif (contract.operation == "*"):
                 contract.value = get_value(contract.dependencies[0], market.N) * get_value(contract.dependencies[1], market.N)
-#            elif (contract.operation == "iIF"):
-#                d = [get_value(dep, market.N) for dep in contract.dependencies]
-#                contract.value = np.where(d[0] > 0, d[1], 0)  # iIF operation implemented as binary operation. I.e. no smoothing ATM
             elif (contract.operation == "sigmoid"):
                 #d = [get_value(dep, market.N) for dep in contract.dependencies]
                 #contract.value = 1.0 / (1.0 + np.exp(-d[0]))
@@ -250,30 +234,79 @@ def update_observables(contract, market):
     if isinstance(contract, Observation):
         if contract.fixing_datetime <= market.t:
             contract.value = market.getObservation(contract.ticker, contract.fixing_datetime)
+            contract.known_at = contract.fixing_datetime
             return True
         return False
 
     # check if contract is a float constant or None
     if isinstance(contract, float) or isinstance(contract, int) or contract is None:
         return True
+
+    # check if contract is iterable (i.e. portfolio)
+    if hasattr(contract, '__iter__'):
+        for cf in contract:
+            update_observables(cf, market)
+        return True
     
     return False 
 
-def collect_cashflows(contract, from_t, to_t):
+def sum_cashflows(contract, from_t, to_t):  # (from_t, to_t]
     if isinstance(contract, Cashflow):
         if contract.payment_date > from_t and contract.payment_date <= to_t:
-            return [contract]
-        return []
+            if isinstance(contract.observable, float) or isinstance(contract.observable, int):
+                return contract.notional * contract.observable
+            return contract.notional * contract.observable.value
+        return 0
     if isinstance(contract, Option):
-        # All trades should be fuzzified at this point
-        raise NotImplementedError("Options can not be resolved at this point")
-    if isinstance(contract, Leg):
-        cfs = []
-        for cf in contract.contracts:
-            cfs += collect_cashflows(cf, from_t, to_t)
-        return cfs
+        if hasattr(contract.condition, 'value'):
+            sigmoid = np.where(contract.condition.value > 0, 1.0, 0.0)  # 1.0 / (1.0 + np.exp(-contract.condition.value))
+            return sigmoid * sum_cashflows(contract.contract1, from_t, to_t) + (1 - sigmoid) * sum_cashflows(contract.contract2, from_t, to_t)
+        return 0
 
-    return []
+    if isinstance(contract, Leg):
+        sum = 0
+        for cf in contract.contracts:
+            sum += sum_cashflows(cf, from_t, to_t)
+        return sum
+
+    return 0
+
+# return list of arrays ["", sigmoid, cashflow_sum] simoid is a condition probability from t0 to from_t.
+def sum_cashflows_per_leg(contract, from_t, to_t, leg_sums):  # (from_t, to_t]
+
+    sigmoid = leg_sums[-1][1]
+    path = leg_sums[-1][0]
+
+    if isinstance(contract, Option):
+        if hasattr(contract.condition, 'value'):
+            this_sigmoid = np.where(contract.condition.value > 0, 1.0, 0.0)  # 1.0 / (1.0 + np.exp(-contract.condition.value))
+            if contract.condition.known_at <= from_t:
+                parent_leg_sum = leg_sums.pop()
+
+                leg_sums.append([path + "1", sigmoid * this_sigmoid, 0.])
+                sum_cashflows_per_leg(contract.contract1, from_t, to_t, leg_sums)
+                leg_sums.append([path + "0", sigmoid * (1 - this_sigmoid), 0.])
+                sum_cashflows_per_leg(contract.contract2, from_t, to_t, leg_sums)
+                leg_sums.append(parent_leg_sum)
+
+                return 
+            elif contract.condition.known_at <= to_t:
+                leg_sums[-1][2] += this_sigmoid * sum_cashflows(contract.contract1, from_t, to_t) + (1.0 - this_sigmoid) * sum_cashflows(contract.contract2, from_t, to_t)
+        return
+    if isinstance(contract, Cashflow):
+        if contract.payment_date > from_t and contract.payment_date <= to_t:
+            if isinstance(contract.observable, float) or isinstance(contract.observable, int):
+                cf_val = contract.notional * contract.observable
+            else:
+                cf_val =  contract.notional * contract.observable.value
+            leg_sums[-1][2] += cf_val
+        return
+
+    if isinstance(contract, Leg):
+        for cf in contract.contracts:
+            sum_cashflows_per_leg(cf, from_t, to_t, leg_sums)
+
+
 
 def trade_simulation_dates(contract, pricing_time_steps):
     req_obs = required_observations(contract)
@@ -317,13 +350,9 @@ def price_mc_trade(contract, market_t0, model):
         next_market.N = N
 
         update_observables(contract, next_market)
-        cfs = collect_cashflows(contract, trade_pricing_time_steps[time_i], trade_pricing_time_steps[time_i + 1])
+        cfs = sum_cashflows(contract, trade_pricing_time_steps[time_i], trade_pricing_time_steps[time_i + 1])
 
-        if cfs:
-#            print(cfs)
-            for cf in cfs:
-                this_value = cf.notional * cf.observable.value
-                trade_cf_sum += this_value
+        trade_cf_sum += cfs
         market_prev = next_market
 
     clear_values(contract)        
@@ -336,7 +365,7 @@ def price_mc_trade(contract, market_t0, model):
 # PV - analytical present value of cashflows
 # sum - sum of cashflows for regression
 
-def cf_pv_and_sum(contract, t):
+def cf_pv_and_sum(contract):
     # Use analytical functions where possible
     # Use LS regression where necessary
 
@@ -344,14 +373,13 @@ def cf_pv_and_sum(contract, t):
     cf_sum = 0
 
     if isinstance(contract, Cashflow):
-        if contract.payment_date >= t:
-            if hasattr(contract.observable, 'value'):
-                return [0, contract.notional * contract.observable.value]
-            return [contract.notional * contract.observable, 0]  # observable is a constant
+        if hasattr(contract.observable, 'value'):
+            return [0, contract.notional * contract.observable.value]
+        return [contract.notional * contract.observable, 0]  # observable is a constant
 
     if isinstance(contract, Leg):
         for cf in contract.contracts:
-            pv_and_sum = cf_pv_and_sum(cf, t)
+            pv_and_sum = cf_pv_and_sum(cf)
             cf_pv += pv_and_sum[0]
             cf_sum += pv_and_sum[1]
         return [cf_pv, cf_sum]
@@ -363,7 +391,7 @@ def cf_pv_and_sum(contract, t):
     return [0, 0]
 
 # Function assumes that all cashflows are computed
-def find_optimal_calls(contract, regression_vars, xva_time_steps):
+def find_optimal_calls(contract, regression_vars, xva_time_steps, keep_interm_values = False):
     if isinstance(contract, Cashflow):
         return
     if isinstance(contract, Leg):
@@ -373,19 +401,30 @@ def find_optimal_calls(contract, regression_vars, xva_time_steps):
         
         return
     if isinstance(contract, Option):
-        if not isinstance(contract.condition, Observation):
-            if not contract.condition.ticker.symbol == "Call":
-                raise NotImplementedError("Only call decisions are supported at this point")
-            
         find_optimal_calls(contract.contract1, regression_vars, xva_time_steps)
         find_optimal_calls(contract.contract2, regression_vars, xva_time_steps)
+
+        if not isinstance(contract.condition, Observation):
+            if not hasattr(contract.condition,"ticker") or not contract.condition.ticker == "Call":
+                sigmoid = np.where(contract.condition.value > 0, 1.0, 0.0)  # 1.0 / (1.0 + np.exp(-contract.condition.value))
+
+                contract1_discounted_cf_value, contract1_dis_cf_sum = cf_pv_and_sum(contract.contract1)
+                contract2_discounted_cf_value, contract2_dis_cf_sum = cf_pv_and_sum(contract.contract2)
+
+                contract1_cont_value = contract1_discounted_cf_value + contract1_dis_cf_sum
+                contract2_cont_value = contract2_discounted_cf_value + contract2_dis_cf_sum
+
+                contract.cont_value = sigmoid * contract1_cont_value + (1 - sigmoid) * contract2_cont_value
+                
+                return
+            
 
         call_date = contract.condition.fixing_datetime
         # both contracts are simple list of cashflows
         # value - analytcal value of cash flows
         # sum - sum of cash flows to do LS pricing
-        contract1_discounted_cf_value, contract1_dis_cf_sum = cf_pv_and_sum(contract.contract1, call_date)
-        contract2_discounted_cf_value, contract2_dis_cf_sum = cf_pv_and_sum(contract.contract2, call_date)
+        contract1_discounted_cf_value, contract1_dis_cf_sum = cf_pv_and_sum(contract.contract1)
+        contract2_discounted_cf_value, contract2_dis_cf_sum = cf_pv_and_sum(contract.contract2)
 
         this_date_regression_vars = {id: regression_vars[id][xva_time_steps.index(call_date)] for id in regression_vars}
 
@@ -403,7 +442,8 @@ def find_optimal_calls(contract, regression_vars, xva_time_steps):
             cont_val_regr1m2 = model.predict(X)
             cont_val_obs = model.intercept_
             for i in range(len(regression_vars)):
-                cont_val_obs = model.coef_[i] * Observation(Ticker(regression_vars_ids[i], "SimulatedMarket"), call_date) + cont_val_obs
+                if (abs(model.coef_[i]) > 1e-6):   # ignore unimportant variables
+                    cont_val_obs = model.coef_[i] * Observation(Ticker(regression_vars_ids[i], "SimulatedMarket"), call_date) + cont_val_obs
 
         reg_condition = contract1_discounted_cf_value + cont_val_regr1m2 > contract2_discounted_cf_value
         this_cont_value = np.where(
@@ -414,78 +454,26 @@ def find_optimal_calls(contract, regression_vars, xva_time_steps):
 
         # TODO: contract[1/2]_discounted_cf_value assumed to be constant value here, but should be obs expression
 
-        contract.condition = (cont_val_obs + contract1_discounted_cf_value) - contract2_discounted_cf_value
+        contract.condition = cont_val_obs
+        if contract1_discounted_cf_value != 0:
+            contract.condition = (contract.condition + contract1_discounted_cf_value)
+        
+        if contract2_discounted_cf_value != 0:
+            contract.condition = (contract.condition - contract2_discounted_cf_value)
 
         contract.cont_value = this_cont_value   # NOTE: We update Option in the contract, so cf_pv_and_sum() can use it
         # TODO: change Option() to fuzzify contract?
         # Create observable for Option condition
 
 
-if __name__  == "__main__":
-
-    index_values = {"SPX": 100.0, "USD": 1.0, "EUR": 1.2}
-
-    market_t0 = Market(index_values, today)
-
-    N = 1000
-
-    market_prev = market_t0
-
-    print(portfolio[0])
-    for trade_i in range(len(portfolio)):
-        portfolio[trade_i] = fuzzify_contract(portfolio[trade_i])
-
-    print(portfolio[0])
-    #regression_var_ids = ["SPX", "EUR", "BASIS2_SPX", "BASIS3_SPX", "BASIS4_SPX"]
-    regression_var_ids = ["SPX", "EUR", "CHEB2_SPX", "CHEB3_SPX", "CHEB4_SPX"]
-
-
-    if call_dates:
-        print("Run LS pass to estimate call decisions. Call Dates: ", call_dates)
-        regression_vars = {id: {} for id in regression_var_ids}
-
-        for time_i in range(len(xva_time_steps) - 1):
-            shocks = {"SPX": np.random.normal(0, 0.1, N), "USD": 0, "EUR": np.random.normal(0, 0.1, N)}
-            market_t1 = SimulatedMarket(market_prev, shocks, xva_time_steps[time_i + 1])
-
-        #    print(spx_path[-1])
-
-            market_t1.N = N
-            
-            for trade_i in range(len(portfolio)):
-                update_observables(portfolio[trade_i], market_t1)        
-                # aadc recording ON  # ticker - inputs
-        #        cfs = collect_cashflows(portfolio[trade_i], xva_time_steps[time_i], xva_time_steps[time_i + 1])
-        #        if cfs:
-        #            print(cfs)
-        #            portfolio_cfs[trade_i][time_i] = cfs
-                # aadc recording off # cashflows - outputs
-
-            if time_i > 0:
-                # Regression variables for call decisions
-                if xva_time_steps[time_i] in call_dates:
-                    for reg_id in regression_var_ids:
-                        regression_vars[reg_id][time_i] = market_prev.getObservation(Ticker(reg_id, "INDEX"), xva_time_steps[time_i])
-
-            market_prev = market_t1
-
-        # reverse pass to estimate call decisions
-        for trade_i in range(len(portfolio)):
-            find_optimal_calls(portfolio[trade_i], regression_vars, xva_time_steps)
-
-        # Fuzzify contracts after call decisions
-        for trade_i in range(len(portfolio)):
-            portfolio[trade_i] = fuzzify_contract(portfolio[trade_i])
-
-
-def fuzzify_callable_contract(contract, market_t0, model):
+def solve_callable_contract(contract, market_t0, model, keep_interm_values = False):
 
     clear_values(contract)
 
-    contract = fuzzify_contract(contract)
+    contract = copy.deepcopy(contract, {})
     
     market_prev = market_t0
-    regression_var_ids = ["SPX", "EUR", "CHEB2_SPX", "CHEB3_SPX", "CHEB4_SPX"]
+    regression_var_ids = ["SPX", "EUR", "BASIS2_SPX"] # "CHEB2_SPX", "CHEB3_SPX", "CHEB4_SPX"]
 
     call_dates = [obs.fixing_datetime for obs in required_observations(contract) if isinstance(obs, Observation) and obs.ticker.symbol == "Call"]
 
@@ -521,14 +509,17 @@ def fuzzify_callable_contract(contract, market_t0, model):
         market_prev = next_market
 
     # reverse pass to estimate call decisions
-    find_optimal_calls(contract, regression_vars, trade_pricing_time_steps)
+    find_optimal_calls(contract, regression_vars, trade_pricing_time_steps, keep_interm_values)
 
     # Fuzzify contracts after call decisions
-    contract = fuzzify_contract(contract)
+#    contract = fuzzify_contract(contract)
 
-    clear_values(contract)
-
-    return contract
+    if not keep_interm_values:
+        clear_values(contract)
+        return contract
+    
+    info = {"reg_vars": regression_vars, "call_dates": call_dates, "trade_pricing_time_steps": trade_pricing_time_steps}
+    return [contract, info]
 
 
 def clear_values(contract):
@@ -536,6 +527,8 @@ def clear_values(contract):
         del contract.value
     if isinstance(contract, Cashflow):
         clear_values(contract.observable)
+        if hasattr(contract, 'condition'):
+            clear_values(contract.condition)
     if isinstance(contract, Leg):
         for cf in contract.contracts:
             clear_values(cf)
@@ -546,119 +539,10 @@ def clear_values(contract):
     if isinstance(contract, ObsOp):
         for dep in contract.dependencies:
             clear_values(dep)
-
-# Price using path-wise MC loop
-if __name__  == "__main__":
-
-    market_prev = market_t0
-    N = 3000 # different number of MC paths for t0 pricing
-
-    for trade_i in range(len(portfolio)):
-        clear_values(portfolio[trade_i])
-
-    trade_cf_sum = [None for _ in range(len(portfolio))]
-
-    for time_i in range(len(xva_time_steps) - 1):
-        shocks = {"SPX": np.random.normal(0, 0.1, N), "USD": 0, "EUR": np.random.normal(0, 0.1, N)}
-        market_t1 = SimulatedMarket(market_prev, shocks, xva_time_steps[time_i + 1])
-
-        market_t1.N = N
-        
-        for trade_i in range(len(portfolio)):
-            update_observables(portfolio[trade_i], market_t1)        
-            # aadc recording ON  # ticker - inputs
-            cfs = collect_cashflows(portfolio[trade_i], xva_time_steps[time_i], xva_time_steps[time_i + 1])
-            if cfs:
-                print(cfs)
-                for cf in cfs:
-                    this_value = cf.notional * cf.observable.value
-                    if trade_cf_sum[trade_i] is None:
-                        trade_cf_sum[trade_i] = np.zeros(N)
-                    trade_cf_sum[trade_i] += this_value
-            # aadc recording off # cashflows - outputs
-
-        market_prev = market_t1
-
-    for trade_i in range(len(portfolio)):
-        print("Trade ", trade_i, " price ", np.average(trade_cf_sum[trade_i]))
-
-    # init set to collect trade cfs
-    portfolio_cfs = [{} for _ in range(len(portfolio))]
-
-    # Run second Monte Carlo pass for XVA
-    market_prev = market_t0
-
-    N = 2000 # different number of MC paths
-
-    regression_vars = {id: {} for id in regression_var_ids}
-
-    spx_path = []
-
-    for trade_i in range(len(portfolio)):
-        clear_values(portfolio[trade_i])
-
-    for time_i in range(len(xva_time_steps) - 1):
-        shocks = {"SPX": np.random.normal(0, 0.1, N), "USD": 0, "EUR": np.random.normal(0, 0.1, N)}
-        market_t1 = SimulatedMarket(market_prev, shocks, xva_time_steps[time_i + 1])
-
-        spx_path.append(market_t1.getObservation(Ticker("SPX", "INDEX"), xva_time_steps[time_i + 1]))
-    #    print(spx_path[-1])
-        
-        market_t1.N = N
-        
-        for trade_i in range(len(portfolio)):
-            update_observables(portfolio[trade_i], market_t1)        
-            # aadc recording ON  # ticker - inputs
-            cfs = collect_cashflows(portfolio[trade_i], xva_time_steps[time_i], xva_time_steps[time_i + 1])
-            if cfs:
-                print(cfs)
-                portfolio_cfs[trade_i][time_i] = cfs
-            # aadc recording off # cashflows - outputs
-
-        if time_i > 0:
-            for reg_id in regression_var_ids:
-                regression_vars[reg_id][time_i] = market_prev.getObservation(Ticker(reg_id, "INDEX"), xva_time_steps[time_i])
-
-        market_prev = market_t1
-
-
-    # reverse time LS pass to estimate regression coefficients
-    trade_cf_sum = [None for _ in range(len(portfolio))]
-
-    #plt.ion()
-
-    for time_i in reversed(range(len(xva_time_steps) - 1)):
-        for trade_i in range(len(portfolio)):
-            if time_i in portfolio_cfs[trade_i]:
-                for cf in portfolio_cfs[trade_i][time_i]:
-                    # TODO: discounting andd payment currency conversion
-                    this_value = cf.notional * cf.observable.value
-                    if trade_cf_sum[trade_i] is None:
-                        trade_cf_sum[trade_i] = this_value
-                    else:
-                        trade_cf_sum[trade_i] += this_value
-
-            # regress cf_sum on regression_vars
-            if (not trade_cf_sum[trade_i] is None) and time_i > 0:
-    #            print(time_i, " ", trade_cf_sum[trade_i])
-                
-                model = LinearRegression()
-                features_for_trade = regression_var_ids # TODO: limit to vars need for the trade
-                X = np.array([regression_vars[reg_id][time_i] for reg_id in features_for_trade]).T
-                model.fit(X, trade_cf_sum[trade_i])
-
-    #            print(time_i, " ", trade_i, " ", model.coef_, " ", model.intercept_)
-
-                biased_price = model.predict(X)
-                if (time_i < 10 | time_i > 320):
-                    plt.scatter(X[:, 0], biased_price)
-                    plt.scatter(X[:, 0], trade_cf_sum[trade_i], s=1, alpha=0.5)
-                    plt.show()
-                    #clear plot
-                    plt.clf()
-
-    for trade_i in range(len(portfolio)):
-        print("Trade ", trade_i, " price ", np.average(trade_cf_sum[trade_i]))
+    # if contract is array(portfolio)
+    if hasattr(contract, '__iter__'):
+        for cf in contract:
+            clear_values(cf)
 
         # Price portfolio on xva dates
         # Allocate cashflows to xva dates (optional)
@@ -677,8 +561,186 @@ if __name__  == "__main__":
         # CVA/DVA ? FVA
 
 
+# collect all sigmoid observables in the contract for given time interval
+def collect_sigmoids(contract, t1, t2):
+    if isinstance(contract, Cashflow):
+        return collect_sigmoids(contract.observable, t1, t2)
+    if isinstance(contract, Leg):
+        sigmoids = []
+        for cf in contract.contracts:
+            sigmoids += collect_sigmoids(cf, t1, t2)
+        return sigmoids
+    if isinstance(contract, Option):
+        return collect_sigmoids(contract.condition, t1, t2) + collect_sigmoids(contract.contract1, t1, t2) + collect_sigmoids(contract.contract2, t1, t2)
+    if isinstance(contract, ObsOp):
+        if contract.operation == "sigmoid":
+            if hasattr(contract, 'known_at') and contract.known_at > t1 and contract.known_at <= t2:
+                return [contract]
+            return []
+        else:
+            sigmoids = []
+            for dep in contract.dependencies:
+                sigmoids += collect_sigmoids(dep, t1, t2)
+            return sigmoids
+
+    return []
+
+def is_scalar_zero(val):
+    return isinstance(val, float) and val == 0
+
+def price_xva_by_regression(portfolio_, market_t0, model, use_sigmoids = True):
+
+    portfolio = copy.deepcopy(portfolio_, {})
+
+    # init set to collect trade cfs
+    portfolio_cfs = [{} for _ in range(len(portfolio))]
+    portfolio_regr = [{} for _ in range(len(portfolio))]
+
+    portfolio_regr_sigmoids = [{} for _ in range(len(portfolio))]
+
+    # Run second Monte Carlo pass for XVA
+    market_prev = market_t0
+
+    regression_var_ids = ["SPX", "EUR", "BASIS2_SPX", "BASIS3_SPX", "BASIS4_SPX", "BSOPT_SPX"] # "CHEB2_SPX", "CHEB3_SPX", "CHEB4_SPX"]
+    regression_var_ids = ["SPX", "BASIS2_SPX", "BASIS3_SPX", "BASIS4_SPX"]
+
+    N = model.num_paths_xva # different number of MC paths
+
+    regression_vars = {id: {} for id in regression_var_ids}
+
+    spx_path = []
+
+    xva_time_steps = model.xva_time_steps
+
+    xva_time_steps = trade_simulation_dates(portfolio, xva_time_steps)
+
+    for trade_i in range(len(portfolio)):
+        clear_values(portfolio[trade_i])
+
+    for time_i in range(len(xva_time_steps) - 1):
+        shocks = {"SPX": np.random.normal(0, 1.0, N), "USD": 0, "EUR": np.random.normal(0, 1.0, N)}
+        market_t1 = SimulatedMarket(market_prev, shocks, xva_time_steps[time_i + 1], model.vols)
+
+        spx_path.append(market_t1.getObservation(Ticker("SPX", "INDEX"), xva_time_steps[time_i + 1]))
+    #    print(spx_path[-1])
+        
+        market_t1.N = N
+        
+        for trade_i in range(len(portfolio)):
+            update_observables(portfolio[trade_i], market_t1)
+            cfs = sum_cashflows(portfolio[trade_i], xva_time_steps[time_i], xva_time_steps[time_i + 1])
+
+            if isinstance(cfs, np.ndarray):
+                portfolio_cfs[trade_i][time_i] = cfs
+
+        if time_i > 0:
+            for reg_id in regression_var_ids:
+                regression_vars[reg_id][time_i] = market_prev.getObservation(Ticker(reg_id, "INDEX"), xva_time_steps[time_i])
+
+            null_shocks = {"SPX": 0, "USD": 0, "EUR": 0}
+            intrinsic_market = SimulatedMarket(market_t1, null_shocks, xva_time_steps[-1], model.vols)
+
+            intrinsic_market.N = N
+            intrinsic_market.interpolation = True
+            
+            # calculate intrinsic value of the trades
+            for trade_i in range(len(portfolio)):
+                copy_trade = copy.deepcopy(portfolio[trade_i], {}) # can be optimized, we don't need to copy computed obs values
+                update_observables(copy_trade, intrinsic_market)
+
+                # collect all remaining cashflows starting from xva_time_steps[time_i + 1]
+                sum_cf = sum_cashflows(copy_trade, xva_time_steps[time_i + 1] - timedelta(days=1), xva_time_steps[-1])
+                if isinstance(sum_cf, np.ndarray):
+                    print("Trade ", trade_i, " intrinsic value ", sum_cf)
+
+                    portfolio_regr[trade_i][time_i] = sum_cf
+
+                # calculate all sigmoid functions that are known up to this point
+                portfolio_regr_sigmoids[trade_i][time_i] = collect_sigmoids(portfolio[trade_i], market_t0.t, xva_time_steps[time_i])
+
+        market_prev = market_t1
+
+    # reverse time LS pass to estimate regression coefficients
+    trade_cf_sum = [None for _ in range(len(portfolio))]
+
+    #plt.ion()
+
+    for time_i in reversed(range(len(xva_time_steps)-1)):
+        for trade_i in range(len(portfolio)):
+            if time_i in portfolio_cfs[trade_i]:
+                if trade_cf_sum[trade_i] is None:
+                    trade_cf_sum[trade_i] = portfolio_cfs[trade_i][time_i]
+                else:
+                    trade_cf_sum[trade_i] += portfolio_cfs[trade_i][time_i]
+
+            # regress cf_sum on regression_vars
+            if (not trade_cf_sum[trade_i] is None) and time_i > 0:
+    #            print(time_i, " ", trade_cf_sum[trade_i])
+                
+                model = LinearRegression()
+                features_for_trade = regression_var_ids # TODO: limit to vars need for the trade
+                X = np.array([regression_vars[reg_id][time_i] for reg_id in features_for_trade]).T
+
+                X_reg_vars_only = X
+
+                # append intrinsic value to X
+                if not portfolio_regr[trade_i][time_i] is None:
+                    X_intr = np.array(portfolio_regr[trade_i][time_i]).T.reshape(-1, 1)
+                    X = np.append(X, X_intr, axis=1)
+
+                X_reg_and_intr = X
+
+                if use_sigmoids:
+                    num_regr_vars = len(X[0])
+                    for sigmoid in portfolio_regr_sigmoids[trade_i][time_i]:
+                        #X_times_sigmoid = X * sigmoids.value
+                        for i in range(num_regr_vars):
+                            X_times_sigmoid = X[:, i] * sigmoid.value
+                            X = np.append(X, (X_times_sigmoid.reshape(-1, 1)), axis=1)
+
+                X_reg_intr_and_sigmoids = X
+                
+                model.fit(X, trade_cf_sum[trade_i])
+
+                print(time_i, " ", trade_i, " ", model.coef_, " ", model.intercept_)
+
+                biased_price = model.predict(X)
+                if (time_i < 10 or time_i > 320):
+                    plt.scatter(X[:, 0], biased_price)
+                    plt.scatter(X[:, 0], trade_cf_sum[trade_i], s=1, alpha=0.5)
+#                    plt.scatter(X[:, 0], X[:, 1], s=1, alpha=0.5)
+                    #clear plot
+                    plt.legend()
+                    plt.title("Trade " + str(trade_i) + " time " + str(time_i) + " date : " + str(xva_time_steps[time_i]))
+                    plt.grid(True)
+                    plt.show()
+                    plt.pause(1)
+                    plt.clf()
+
+                    if False:
+                        model_reg_vars_only = LinearRegression()
+                        model_reg_vars_only.fit(X_reg_vars_only, trade_cf_sum[trade_i])
+                        biased_price_reg_vars_only = model_reg_vars_only.predict(X_reg_vars_only)
+
+                        model_reg_and_intr = LinearRegression()
+                        model_reg_and_intr.fit(X_reg_and_intr, trade_cf_sum[trade_i])
+                        biased_price_reg_and_intr = model_reg_and_intr.predict(X_reg_and_intr)
+
+                        model_reg_intr_and_sigmoids = LinearRegression()
+                        model_reg_intr_and_sigmoids.fit(X_reg_intr_and_sigmoids, trade_cf_sum[trade_i])
+                        biased_price_reg_intr_and_sigmoids = model_reg_intr_and_sigmoids.predict(X_reg_intr_and_sigmoids)
+
+                        plt.scatter(biased_price_reg_vars_only, biased_price_reg_intr_and_sigmoids)
+                        plt.scatter(biased_price_reg_and_intr, biased_price_reg_intr_and_sigmoids)
+                        plt.title("Trade " + str(trade_i) + " time " + str(time_i) + " date : " + str(xva_time_steps[time_i]))
+                        plt.grid(True)
+                        plt.show()
+                        plt.pause(1)
 
 
+
+#    for trade_i in range(len(portfolio)):
+#        print("Trade ", trade_i, " price ", np.average(trade_cf_sum[trade_i]))
 
 
     #plt.plot(xva_time_steps[1:], spx_path)

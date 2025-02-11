@@ -2,7 +2,7 @@
 
 This project provides a reference implementation of modern quantitative analytics suitable for:
 - Algorithmic Differentiation (AAD)
-- Longstaff-Schwartz (LS) regression 
+- Longstaff-Schwartz (LS) regression is used to handle callable products 
 - XVA calculations via regression and AAD
 
 ## Overview
@@ -27,6 +27,7 @@ Key features:
 1. `observable.ipynb`: Introduces the core concepts of observables and market data abstraction
 2. `contract.ipynb`: Shows how to build complex contracts from simple building blocks
 3. `analytics_demo.ipynb`: Demonstrates advanced features like LS regression and XVA
+4. `analytics_aadc_exp_demo.ipynb`: Shows how to use AADC to compute sensitivities
 
 ### Key Concepts
 
