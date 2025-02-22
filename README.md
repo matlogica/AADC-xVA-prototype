@@ -28,6 +28,7 @@ Key features:
 2. `contract.ipynb`: Shows how to build complex contracts from simple building blocks
 3. `analytics_demo.ipynb`: Demonstrates advanced features like LS regression and XVA
 4. `analytics_aadc_exp_demo.ipynb`: Shows how to use AADC to compute sensitivities
+5. `rates_demo.ipynb`: Interest Rate Products Construction Tutorial covering swaps, swaptions and bermudans
 
 ### Key Concepts
 
